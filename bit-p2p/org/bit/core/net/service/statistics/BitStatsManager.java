@@ -1,0 +1,82 @@
+package org.bit.core.net.service.statistics;
+
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import java.net.InetAddress;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+import org.bit.common.es.ExecutorServiceManager;
+import org.bit.common.prometheus.MetricKeys;
+import org.bit.common.prometheus.MetricLabels;
+import org.bit.common.prometheus.Metrics;
+import org.bit.core.metrics.MetricsKey;
+import org.bit.core.metrics.MetricsUtil;
+import org.bit.core.net.BitNetService;
+import org.bit.p2p.stats.P2pStats;
+
+@Slf4j(topic = "net")
+@Component
+public class BitStatsManager {
+  private volatile long TCP_TRAFFIC_IN = 0;
+  private volatile long TCP_TRAFFIC_OUT = 0;
+  private volatile long UDP_TRAFFIC_IN = 0;
+  private volatile long UDP_TRAFFIC_OUT = 0;
+
+  private static Cache<InetAddress, NodeStatistics> cache = CacheBuilder.newBuilder()
+          .maximumSize(3000).recordStats().build();
+
+  private final String esName = "net-traffic-collector";
+
+  private ScheduledExecutorService executor =
+      ExecutorServiceManager.newSingleThreadScheduledExecutor(esName);
+
+  public static NodeStatistics getNodeStatistics(InetAddress inetAddress) {
+    NodeStatistics nodeStatistics = cache.getIfPresent(inetAddress);
+    if (nodeStatistics == null) {
+      nodeStatistics = new NodeStatistics();
+      cache.put(inetAddress, nodeStatistics);
+    }
+    return nodeStatistics;
+  }
+
+  public void init() {
+    executor.scheduleWithFixedDelay(() -> {
+      try {
+        work();
+      } catch (Throwable t) {
+        logger.error("Exception in traffic stats worker, {}", t.getMessage());
+      }
+    }, 1, 1, TimeUnit.SECONDS);
+  }
+
+  public void close() {
+    ExecutorServiceManager.shutdownAndAwaitTermination(executor, esName);
+  }
+
+  private void work() {
+    P2pStats stats = BitNetService.getP2pService().getP2pStats();
+
+    MetricsUtil.meterMark(MetricsKey.NET_TCP_IN_TRAFFIC,
+            stats.getTcpInSize() - TCP_TRAFFIC_IN);
+    Metrics.histogramObserve(MetricKeys.Histogram.TCP_BYTES,
+            stats.getTcpInSize() - TCP_TRAFFIC_IN,
+            MetricLabels.Histogram.TRAFFIC_IN);
+    MetricsUtil.meterMark(MetricsKey.NET_TCP_OUT_TRAFFIC,
+            stats.getTcpOutSize() - TCP_TRAFFIC_OUT);
+    Metrics.histogramObserve(MetricKeys.Histogram.UDP_BYTES,
+            stats.getUdpInSize() - UDP_TRAFFIC_IN,
+            MetricLabels.Histogram.TRAFFIC_IN);
+    MetricsUtil.meterMark(MetricsKey.NET_UDP_OUT_TRAFFIC,
+            stats.getUdpOutSize() - UDP_TRAFFIC_OUT);
+    Metrics.histogramObserve(MetricKeys.Histogram.UDP_BYTES,
+            stats.getUdpOutSize() - UDP_TRAFFIC_OUT,
+            MetricLabels.Histogram.TRAFFIC_OUT);
+
+    TCP_TRAFFIC_IN = stats.getTcpInSize();
+    TCP_TRAFFIC_OUT = stats.getTcpOutSize();
+    UDP_TRAFFIC_IN = stats.getUdpInSize();
+    UDP_TRAFFIC_OUT = stats.getUdpOutSize();
+  }
+}
